@@ -1,0 +1,66 @@
+# ===========================================
+# ML model outputs & large data files
+# ===========================================
+clax-ml/**/outputs/
+clax-ml/**/models/
+clax-ml/**/__pycache__/
+clax-ml/**/*.onnx*
+clax-ml/**/*.pth
+clax-ml/**/*.pkl
+clax-ml/**/*.joblib
+clax-ml/**/*.csv
+
+# ===========================================
+# Secrets & credentials — NEVER commit
+# ===========================================
+.env
+.env.*
+!.env.example
+identity/
+devices/
+credentials/
+agents/main/agent/auth-profiles.json
+agents/main/agent/auth-state.json
+
+# ===========================================
+# Runtime state — auto-generated, do not commit
+# ===========================================
+agents/main/sessions/sessions.json
+tasks/*.sqlite*
+tasks/*.sqlite-shm
+tasks/*.sqlite-wal
+logs/
+*.bak
+update-check.json
+workspace/.openclaw/
+canvas/index.html
+completions/
+
+# ===========================================
+# Python
+# ===========================================
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# ===========================================
+# Testing / linting
+# ===========================================
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ===========================================
+# Node
+# ===========================================
+node_modules/
+
+# ===========================================
+# Virtual environments
+# ===========================================
+.venv/
+venv/

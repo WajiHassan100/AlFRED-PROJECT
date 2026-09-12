@@ -1,0 +1,66 @@
+
+networks:
+  alfred-network:
+    driver: bridge
+
+services:
+  alfred-api:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_started
+      openclaw-gateway:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - alfred-network
+
+  openclaw-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.openclaw
+    ports:
+      - "18789:18789"
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18789/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    networks:
+      - alfred-network
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - alfred-network
+
+  reconciliation-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "app/backend_services/retry-reconciliation-worker/d5_reconciliation_worker.py"]
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_started
+      openclaw-gateway:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - alfred-network

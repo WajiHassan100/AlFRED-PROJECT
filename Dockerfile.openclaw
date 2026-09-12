@@ -1,0 +1,27 @@
+# Use the official OpenClaw Docker image
+FROM ghcr.io/openclaw/openclaw:latest
+
+# Switch to the root user temporarily if needed to create directories
+USER root
+
+# Ensure the .openclaw directories exist in the standard runtime paths
+RUN mkdir -p /home/node/.openclaw/workspace
+
+# Overlay our customized runtime files
+COPY alfred-openclaw/openclaw.json /home/node/.openclaw/openclaw.json
+COPY alfred-openclaw/workspace/ /home/node/.openclaw/workspace/
+
+# Ensure proper permissions
+RUN chown -R node:node /home/node/.openclaw
+
+# Copy custom entrypoint script
+COPY alfred-openclaw/entrypoint.sh /home/node/.openclaw/entrypoint.sh
+RUN chmod +x /home/node/.openclaw/entrypoint.sh
+
+# Drop back to the non-privileged user for security
+USER node
+
+# Expose the Gateway port
+EXPOSE 18789
+
+ENTRYPOINT ["/home/node/.openclaw/entrypoint.sh"]
