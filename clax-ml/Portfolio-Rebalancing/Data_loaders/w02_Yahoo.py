@@ -1,6 +1,7 @@
 # Data_loaders/w02_Yahoo.py
 # --------------------
 import os
+import sys
 import time
 import pandas as pd
 import yfinance as yf
@@ -9,12 +10,22 @@ from datetime import timedelta
 import logging
 from tqdm import tqdm
 
+# Ensure clax-ml root is importable
+_clax_ml_root = str(Path(__file__).resolve().parents[2])
+if _clax_ml_root not in sys.path:
+    sys.path.insert(0, _clax_ml_root)
+
+from shared_data_loaders.liquidity import (
+    get_top_liquid_stocks_yfinance as get_top_liquid_stocks,
+)
+
 # ------------------ Logging Setup ------------------ #
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 logger = logging.getLogger(__name__)
+
 
 def run_pipeline():
     """
@@ -212,60 +223,6 @@ def filter_universe(top_n: int = 20, lookback_days: int = 22):
     top_universe["Date"] = top_universe["Date"].dt.strftime("%Y-%m-%d")
     return top_universe.to_dict(orient="records")
 
-def get_top_liquid_stocks(symbols, top_n=50, liquidity_days=252):
-    """
-    Fetches volume data and returns the top N most liquid stocks.
-    """
-    logger.info(f"Identifying top {top_n} most liquid stocks from {len(symbols)} tickers...")
-    start_time = time.time()
-    end_date = pd.Timestamp.today()
-    start_date = end_date - timedelta(days=liquidity_days + 50) # Fetch a bit more for buffer
-
-    # Fetch volume data for all symbols
-    fetch_volume_start = time.time()
-    logger.info(f"Downloading volume data for {len(symbols)} symbols...")
-    all_volume_data = yf.download(
-        symbols,
-        start=start_date.strftime("%Y-%m-%d"),
-        end=end_date.strftime("%Y-%m-%d"),
-        group_by="ticker",
-        auto_adjust=True,
-        threads=True,
-        progress=True # Set to True to see yfinance's internal progress
-    )
-    logger.info(f"Finished downloading volume data in {time.time() - fetch_volume_start:.2f} seconds.")
-
-    if all_volume_data.empty:
-        logger.warning("⚠️ Could not fetch volume data for liquidity check. Using original list (first %d).", top_n)
-        return symbols[:top_n]
-
-    # Calculate average volume for each stock
-    calculate_avg_volume_start = time.time()
-    logger.info("Calculating average volumes...")
-    avg_volumes = {}
-    for symbol in tqdm(symbols, desc="Calculating Avg Volume"):
-        try:
-            # Handle both single and multi-level column structures
-            if isinstance(all_volume_data.columns, pd.MultiIndex):
-                symbol_data = all_volume_data[symbol]
-            else:
-                # If only one symbol was fetched, columns are not multi-indexed
-                symbol_data = all_volume_data if len(symbols) == 1 else all_volume_data.xs(symbol, level=1, axis=1)
-
-            if not symbol_data.empty and 'Volume' in symbol_data.columns:
-                # Calculate average daily volume over the last year
-                avg_volumes[symbol] = symbol_data['Volume'].mean()
-        except (KeyError, IndexError):
-            logger.debug(f"Could not process volume for {symbol}. It might be delisted or have no data.")
-            avg_volumes[symbol] = 0
-    logger.info(f"Calculated average volumes in {time.time() - calculate_avg_volume_start:.2f} seconds.")
-
-    # Sort by volume and get top N
-    sorted_symbols = sorted(avg_volumes.items(), key=lambda item: item[1], reverse=True)
-    top_liquid_symbols = [symbol for symbol, volume in sorted_symbols[:top_n]]
-
-    logger.info(f"✅ Identified Top {top_n} Liquid Stocks (e.g., {top_liquid_symbols[:5]}...) in {time.time() - start_time:.2f} seconds.")
-    return top_liquid_symbols
 
 def fetch_data(symbols, start="2015-01-01", end=None, batch_size=50):
     if end is None:
@@ -288,6 +245,7 @@ def fetch_data(symbols, start="2015-01-01", end=None, batch_size=50):
             logger.error(f"Error fetching batch {i//batch_size+1}: {e}")
         time.sleep(1) # Be respectful to the API
     return all_data
+
 
 if __name__ == "__main__":
     run_pipeline()

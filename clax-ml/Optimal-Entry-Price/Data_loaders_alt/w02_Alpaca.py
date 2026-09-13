@@ -1,6 +1,7 @@
 # Data_loaders_alt/w02_Alpaca.py
 # -----------------------------
 import os
+import sys
 import time
 import logging
 from datetime import timedelta
@@ -10,6 +11,13 @@ import pandas as pd
 from dotenv import load_dotenv
 import alpaca_trade_api as tradeapi
 from tqdm import tqdm
+
+# Ensure clax-ml root is importable
+_clax_ml_root = str(Path(__file__).resolve().parents[2])
+if _clax_ml_root not in sys.path:
+    sys.path.insert(0, _clax_ml_root)
+
+from shared_data_loaders.liquidity import get_top_liquid_stocks_alpaca
 
 # ------------------ Logging Setup ------------------ #
 logging.basicConfig(
@@ -104,49 +112,15 @@ def _select_price_cols(df):
 def get_top_liquid_stocks(symbols, top_n=50, liquidity_days=252, batch_size=200):
     """
     Fetches volume data via Alpaca and returns the top N most liquid stocks.
+    Delegates to shared_data_loaders.liquidity.get_top_liquid_stocks_alpaca with api=None.
     """
-    logger.info("Identifying top %d most liquid stocks from %d tickers...", top_n, len(symbols))
-    start_time = time.time()
-    end_date = pd.Timestamp.today(tz="UTC")
-    start_date = end_date - timedelta(days=liquidity_days + 50)
-
-    avg_volumes = {s: 0 for s in symbols}
-
-    for i in tqdm(range(0, len(symbols), batch_size), desc="Liquidity Batches"):
-        batch = symbols[i:i + batch_size]
-        try:
-            bars = api.get_bars(
-                batch,
-                tradeapi.TimeFrame.Day,
-                start=start_date.isoformat(),
-                end=end_date.isoformat(),
-                adjustment="all",
-            ).df
-        except Exception as e:
-            logger.warning("Alpaca liquidity batch failed: %s", e)
-            continue
-
-        if bars is None or bars.empty:
-            continue
-
-        if isinstance(bars.index, pd.MultiIndex):
-            for symbol, g in bars.groupby(level=0):
-                if "volume" in g.columns:
-                    avg_volumes[symbol] = g["volume"].mean()
-        else:
-            if "symbol" in bars.columns and "volume" in bars.columns:
-                grouped = bars.groupby("symbol")["volume"].mean()
-                for symbol, vol in grouped.items():
-                    avg_volumes[symbol] = vol
-
-        time.sleep(0.25)
-
-    sorted_symbols = sorted(avg_volumes.items(), key=lambda item: item[1], reverse=True)
-    top_liquid_symbols = [symbol for symbol, _ in sorted_symbols[:top_n]]
-
-    logger.info("Identified Top %d Liquid Stocks (e.g., %s...) in %.2f seconds.",
-                top_n, top_liquid_symbols[:5], time.time() - start_time)
-    return top_liquid_symbols
+    return get_top_liquid_stocks_alpaca(
+        symbols=symbols,
+        top_n=top_n,
+        liquidity_days=liquidity_days,
+        batch_size=batch_size,
+        api=None,
+    )
 
 
 def fetch_bars_alpaca(symbols, start="2015-01-01", end=None, batch_size=200):

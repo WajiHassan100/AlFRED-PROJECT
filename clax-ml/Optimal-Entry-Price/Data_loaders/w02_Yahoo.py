@@ -1,6 +1,7 @@
 # Data_loaders/w02_Yahoo.py
 # --------------------
 import os
+import sys
 import time
 import pandas as pd
 import yfinance as yf
@@ -9,6 +10,17 @@ from datetime import timedelta
 import logging
 from tqdm import tqdm
 
+# Ensure clax-ml root is importable
+_clax_ml_root = str(Path(__file__).resolve().parents[2])
+if _clax_ml_root not in sys.path:
+    sys.path.insert(0, _clax_ml_root)
+
+from shared_data_loaders.liquidity import (
+    normalize_yahoo_symbol,
+    normalize_yahoo_symbol as _normalize_yahoo_symbol,
+    get_top_liquid_stocks_yfinance as get_top_liquid_stocks,
+)
+
 # ------------------ Logging Setup ------------------ #
 logging.basicConfig(
     level=logging.INFO,
@@ -16,22 +28,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def _normalize_yahoo_symbol(symbol: str) -> str:
-    """
-    Normalize symbols for Yahoo Finance.
-
-    Examples:
-    - BRK-B -> BRK.B
-    - BF-B  -> BF.B
-
-    Keeps non-equity symbols (indices, FX, futures) unchanged.
-    """
-    if not isinstance(symbol, str):
-        return symbol
-    # Leave indices, FX pairs, and futures untouched
-    if symbol.startswith("^") or "=" in symbol:
-        return symbol
-    return symbol.replace("-", ".")
 
 def run_pipeline():
     """
@@ -167,70 +163,6 @@ def run_pipeline():
     logger.info(f"Saved CSVs in {time.time() - save_csv_start:.2f} seconds.")
     logger.info(f"====== Yahoo Finance data fetching pipeline completed in {time.time() - start_time:.2f} seconds. ======")
 
-def get_top_liquid_stocks(symbols, top_n=50, liquidity_days=252):
-    """
-    Fetches volume data and returns the top N most liquid stocks.
-    """
-    logger.info(f"Identifying top {top_n} most liquid stocks from {len(symbols)} tickers...")
-    start_time = time.time()
-    end_date = pd.Timestamp.today()
-    start_date = end_date - timedelta(days=liquidity_days + 50) # Fetch a bit more for buffer
-
-    # Fetch volume data for all symbols
-    fetch_volume_start = time.time()
-    logger.info(f"Downloading volume data for {len(symbols)} symbols...")
-    all_volume_data = None
-    try:
-        all_volume_data = yf.download(
-            symbols,
-            start=start_date.strftime("%Y-%m-%d"),
-            end=end_date.strftime("%Y-%m-%d"),
-            group_by="ticker",
-            auto_adjust=True,
-            threads=True,
-            progress=True # Set to True to see yfinance's internal progress
-        )
-    except Exception as e:
-        logger.warning("⚠️ yfinance liquidity download failed: %s", e)
-    logger.info(f"Finished downloading volume data in {time.time() - fetch_volume_start:.2f} seconds.")
-
-    if all_volume_data is None or all_volume_data.empty:
-        logger.warning("⚠️ Could not fetch volume data for liquidity check. Using original list (first %d).", top_n)
-        return symbols[:top_n]
-
-    # Calculate average volume for each stock
-    calculate_avg_volume_start = time.time()
-    logger.info("Calculating average volumes...")
-    avg_volumes = {}
-    for symbol in tqdm(symbols, desc="Calculating Avg Volume"):
-        try:
-            # Handle both single and multi-level column structures
-            if isinstance(all_volume_data.columns, pd.MultiIndex):
-                symbol_data = all_volume_data[symbol]
-            else:
-                # If only one symbol was fetched, columns are not multi-indexed
-                symbol_data = all_volume_data if len(symbols) == 1 else all_volume_data.xs(symbol, level=1, axis=1)
-
-            if symbol_data is None or symbol_data.empty:
-                logger.warning("⚠️ No volume data for %s during liquidity check; treating as 0.", symbol)
-                avg_volumes[symbol] = 0
-            elif 'Volume' in symbol_data.columns:
-                # Calculate average daily volume over the last year
-                avg_volumes[symbol] = symbol_data['Volume'].mean()
-            else:
-                logger.warning("⚠️ Missing Volume column for %s during liquidity check; treating as 0.", symbol)
-                avg_volumes[symbol] = 0
-        except (KeyError, IndexError):
-            logger.debug(f"Could not process volume for {symbol}. It might be delisted or have no data.")
-            avg_volumes[symbol] = 0
-    logger.info(f"Calculated average volumes in {time.time() - calculate_avg_volume_start:.2f} seconds.")
-
-    # Sort by volume and get top N
-    sorted_symbols = sorted(avg_volumes.items(), key=lambda item: item[1], reverse=True)
-    top_liquid_symbols = [symbol for symbol, volume in sorted_symbols[:top_n]]
-
-    logger.info(f"✅ Identified Top {top_n} Liquid Stocks (e.g., {top_liquid_symbols[:5]}...) in {time.time() - start_time:.2f} seconds.")
-    return top_liquid_symbols
 
 def fetch_data(symbols, start="2015-01-01", end=None, batch_size=50):
     if end is None:
@@ -260,6 +192,7 @@ def fetch_data(symbols, start="2015-01-01", end=None, batch_size=50):
             logger.error(f"Error fetching batch {i//batch_size+1}: {e}")
         time.sleep(1) # Be respectful to the API
     return all_data
+
 
 if __name__ == "__main__":
     run_pipeline()
