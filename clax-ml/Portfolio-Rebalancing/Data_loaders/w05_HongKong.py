@@ -1,12 +1,19 @@
 # Data_loaders/w05_HongKong.py
 # --------------------
-import os
+import sys
 import time
 import pandas as pd
 import yfinance as yf
 from pathlib import Path
 import logging
 from tqdm import tqdm
+
+# Ensure clax-ml root is importable
+_clax_ml_root = str(Path(__file__).resolve().parents[2])
+if _clax_ml_root not in sys.path:
+    sys.path.insert(0, _clax_ml_root)
+
+from shared_data_loaders.liquidity import fetch_yahoo_data
 
 # ------------------ Logging Setup ------------------ #
 logging.basicConfig(
@@ -29,54 +36,81 @@ HONGKONG_SYMBOLS = [
     "1997.HK", "2007.HK", "2018.HK", "2269.HK", "2313.HK",
     "2318.HK", "2319.HK", "2331.HK", "2382.HK", "2388.HK",
     "2628.HK", "2688.HK", "2899.HK", "3328.HK", "3690.HK",
-    "3968.HK", "3988.HK", "6881.HK"
+    "3968.HK", "3988.HK", "6881.HK",
 ]
 
 OUTPUT_PATH = "outputs/05_HongKong_OHLCV.csv"
 
+
+# ------------------ HK-specific retry helper ------------------ #
+def _retry_failed_tickers(
+    failed_tickers: list,
+    start: str,
+    end: str,
+) -> list:
+    """
+    Retries individual tickers that failed during batch download.
+    HK-specific: wraps each single-ticker result in a MultiIndex so it
+    merges cleanly with the batch DataFrames returned by fetch_yahoo_data.
+
+    This retry logic is unique to the HK loader (HK equities have higher
+    per-ticker failure rates than US equities) and is not part of the
+    shared fetch_yahoo_data implementation.
+    """
+    extra_data = []
+    logger.info("Retrying %d failed tickers individually...", len(failed_tickers))
+    for ticker in failed_tickers:
+        try:
+            df = yf.download(
+                ticker, start=start, end=end,
+                auto_adjust=True, progress=False
+            )
+            if df is not None and not df.empty:
+                # Wrap in MultiIndex so it's compatible with batch DataFrames
+                df.columns = pd.MultiIndex.from_product([[ticker], df.columns])
+                extra_data.append(df)
+                logger.info("✅ Successfully fetched %s on retry", ticker)
+            else:
+                logger.warning("❌ No data found for %s on retry", ticker)
+        except Exception as e:
+            logger.error("❌ Failed to fetch %s on retry: %s", ticker, e)
+        time.sleep(1)
+    return extra_data
+
+
 def fetch_data(symbols, start="2015-01-01", end=None, batch_size=50):
+    """
+    Fetches Hong Kong stock data via yfinance.
+
+    Delegates the bulk batch download to shared_data_loaders.liquidity.fetch_yahoo_data,
+    then retries any individually failed tickers using _retry_failed_tickers
+    (HK-specific enhancement — not present in other agents' loaders).
+    """
     if end is None:
         end = pd.Timestamp.today().strftime("%Y-%m-%d")
 
-    all_data = []
-    failed_tickers = []
+    # --- Bulk batch download via shared module ---
+    # fetch_yahoo_data skips empty/failed batches with a warning.
+    # We track which symbols were NOT covered to feed the retry loop.
+    all_data = fetch_yahoo_data(symbols, start=start, end=end, batch_size=batch_size)
 
-    # ---------------- Batch Download ---------------- #
-    for i in tqdm(range(0, len(symbols), batch_size), desc="Fetching Hong Kong Data Batches"):
-        batch = symbols[i:i+batch_size]
-        try:
-            df = yf.download(
-                batch, start=start, end=end, group_by="ticker",
-                auto_adjust=True, threads=True, progress=False
-            )
-            if df is not None and not df.empty:
-                all_data.append(df)
-        except Exception as e:
-            logger.error(f"Error fetching batch {i//batch_size+1}: {e}")
-            failed_tickers.extend(batch)
-        time.sleep(1)
+    # --- Identify symbols with no data in any batch ---
+    fetched_symbols: set = set()
+    for batch_df in all_data:
+        if isinstance(batch_df.columns, pd.MultiIndex):
+            fetched_symbols.update(batch_df.columns.get_level_values(0))
+        else:
+            fetched_symbols.update(batch_df.columns)
 
-    # ---------------- Retry Failed Tickers Individually ---------------- #
+    failed_tickers = [s for s in symbols if s not in fetched_symbols]
+
+    # --- Retry failed tickers individually (HK-specific) ---
     if failed_tickers:
-        logger.info(f"Retrying {len(failed_tickers)} failed tickers individually...")
-        for ticker in failed_tickers:
-            try:
-                df = yf.download(
-                    ticker, start=start, end=end,
-                    auto_adjust=True, progress=False
-                )
-                if df is not None and not df.empty:
-                    # Wrap single-ticker DataFrame in a MultiIndex format
-                    df.columns = pd.MultiIndex.from_product([[ticker], df.columns])
-                    all_data.append(df)
-                    logger.info(f"✅ Successfully fetched {ticker} on retry")
-                else:
-                    logger.warning(f"❌ No data found for {ticker} on retry")
-            except Exception as e:
-                logger.error(f"❌ Failed to fetch {ticker} on retry: {e}")
-            time.sleep(1)
+        retry_data = _retry_failed_tickers(failed_tickers, start=start, end=end)
+        all_data.extend(retry_data)
 
     return all_data
+
 
 def run_pipeline():
     logger.info("====== Starting Data Loader 05: Hong Kong Stock Data Fetching ======")
@@ -85,9 +119,9 @@ def run_pipeline():
     symbols = HONGKONG_SYMBOLS
     logger.info(f"Fetching data for {len(symbols)} Hong Kong stocks...")
 
-    # Fetch data
+    # Fetch data (bulk via shared module + HK-specific retry)
     data_batches = fetch_data(symbols)
-    logger.info(f"Fetched data in batches (including retries).")
+    logger.info("Fetched data in batches (including retries).")
 
     # Reformat into DataFrame
     frames = []
@@ -121,6 +155,7 @@ def run_pipeline():
         logger.error("❌ No data fetched for Hong Kong stocks.")
 
     logger.info(f"Total time: {time.time() - start_time:.2f} seconds.")
+
 
 if __name__ == "__main__":
     run_pipeline()

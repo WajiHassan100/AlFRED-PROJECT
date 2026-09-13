@@ -1,12 +1,18 @@
 # Data_loaders/w06_Shanghai.py
 # --------------------
-import os
+import sys
 import time
 import pandas as pd
-import yfinance as yf
 from pathlib import Path
 import logging
 from tqdm import tqdm
+
+# Ensure clax-ml root is importable
+_clax_ml_root = str(Path(__file__).resolve().parents[2])
+if _clax_ml_root not in sys.path:
+    sys.path.insert(0, _clax_ml_root)
+
+from shared_data_loaders.liquidity import fetch_yahoo_data as fetch_data
 
 # ------------------ Logging Setup ------------------ #
 logging.basicConfig(
@@ -134,25 +140,6 @@ SHANGHAI_SYMBOLS = [
 
 OUTPUT_PATH = "outputs/06_Shanghai_OHLCV.csv"
 
-def fetch_data(symbols, start="2015-01-01", end=None, batch_size=50):
-    if end is None:
-        end = pd.Timestamp.today().strftime("%Y-%m-%d")
-
-    all_data = []
-    num_batches = (len(symbols) + batch_size - 1) // batch_size
-    for i in tqdm(range(0, len(symbols), batch_size), desc="Fetching Shanghai Data Batches"):
-        batch = symbols[i:i+batch_size]
-        try:
-            df = yf.download(
-                batch, start=start, end=end, group_by="ticker",
-                auto_adjust=True, threads=True, progress=False
-            )
-            if df is not None and not df.empty:
-                all_data.append(df)
-        except Exception as e:
-            logger.error(f"Error fetching batch {i//batch_size+1}: {e}")
-        time.sleep(1)  # Be respectful to the API
-    return all_data
 
 def run_pipeline():
     logger.info("====== Starting Data Loader 06: Shanghai Stock Data Fetching ======")
@@ -161,9 +148,9 @@ def run_pipeline():
     symbols = SHANGHAI_SYMBOLS[:50]  # Limit to first 50 for testing
     logger.info(f"Fetching data for {len(symbols)} Shanghai stocks...")
 
-    # Fetch data
+    # Fetch data via shared module
     data_batches = fetch_data(symbols)
-    logger.info(f"Fetched data in batches.")
+    logger.info("Fetched data in batches.")
 
     # Reformat into DataFrame
     frames = []
@@ -197,6 +184,7 @@ def run_pipeline():
         logger.error("❌ No data fetched for Shanghai stocks.")
 
     logger.info(f"Total time: {time.time() - start_time:.2f} seconds.")
+
 
 if __name__ == "__main__":
     run_pipeline()
