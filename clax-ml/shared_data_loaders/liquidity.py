@@ -1,12 +1,16 @@
 # clax-ml/shared_data_loaders/liquidity.py
 # ----------------------------------------
 """
-Shared Liquidity Ranking & Symbol Normalization Module.
+Shared Liquidity Ranking, Symbol Normalization, and Price-Fetching Module.
 
 Provides:
 - normalize_yahoo_symbol: Converts broker/Alpaca symbol formats (e.g. BRK-B) to Yahoo format (BRK.B).
 - get_top_liquid_stocks_yfinance: Identifies top liquid stocks by volume using yfinance.
 - get_top_liquid_stocks_alpaca: Identifies top liquid stocks by volume using Alpaca REST API.
+- fetch_yahoo_data: Batch-downloads OHLCV data from Yahoo Finance (yfinance).
+- fetch_alpaca_bars: Batch-downloads OHLCV bars from Alpaca REST API.
+- _bars_to_frames: Internal helper — splits an Alpaca bars DataFrame into per-ticker DataFrames.
+- _select_price_cols: Internal helper — standardizes column names (open→Open, etc.) and selects OHLCV+Ticker.
 """
 
 import os
@@ -275,3 +279,226 @@ def get_top_liquid_stocks_alpaca(
         time.time() - start_time
     )
     return top_liquid_symbols
+
+
+# ------------------ yfinance Price Fetcher ------------------ #
+def fetch_yahoo_data(
+    symbols: List[str],
+    start: str = "2015-01-01",
+    end: Optional[str] = None,
+    batch_size: int = 50,
+) -> List[pd.DataFrame]:
+    """
+    Batch-downloads OHLCV data from Yahoo Finance.
+
+    Fetches `symbols` in batches of `batch_size`, sleeping 1 second between batches
+    to be respectful to the API. Empty or failed batches are skipped with a warning.
+
+    Parameters
+    ----------
+    symbols : List[str]
+        Yahoo Finance ticker symbols to download.
+    start : str, default="2015-01-01"
+        Start date (inclusive) in YYYY-MM-DD format.
+    end : Optional[str], default=None
+        End date (exclusive) in YYYY-MM-DD format. Defaults to today.
+    batch_size : int, default=50
+        Number of symbols per yfinance download call.
+
+    Returns
+    -------
+    List[pd.DataFrame]
+        One DataFrame per successful batch (possibly multi-indexed by ticker).
+        Empty batches and failed batches are omitted.
+    """
+    if yf is None:
+        logger.error("yfinance is not installed; cannot fetch Yahoo data.")
+        return []
+
+    if end is None:
+        end = pd.Timestamp.today().strftime("%Y-%m-%d")
+
+    all_data: List[pd.DataFrame] = []
+    num_batches = (len(symbols) + batch_size - 1) // batch_size
+
+    for i in tqdm(range(0, len(symbols), batch_size), desc="Fetching Data Batches"):
+        batch = symbols[i:i + batch_size]
+        try:
+            df = yf.download(
+                batch, start=start, end=end, group_by="ticker",
+                auto_adjust=True, threads=True, progress=False
+            )
+            if df is None or df.empty:
+                logger.warning(
+                    "⚠️ yfinance returned empty data for batch %d/%d; skipping this batch.",
+                    (i // batch_size) + 1,
+                    num_batches,
+                )
+            else:
+                all_data.append(df)
+        except Exception as e:
+            logger.error("Error fetching batch %d/%d: %s", (i // batch_size) + 1, num_batches, e)
+        time.sleep(1)  # Be respectful to the API
+
+    return all_data
+
+
+# ------------------ Alpaca Price Fetcher helpers ------------------ #
+def _bars_to_frames(bars_df: pd.DataFrame) -> List[pd.DataFrame]:
+    """
+    Split an Alpaca bars DataFrame (possibly MultiIndex) into a list of
+    per-ticker DataFrames, each with a 'date' column and a 'Ticker' column.
+
+    Handles three layouts returned by different alpaca-trade-api versions:
+    1. MultiIndex (symbol, timestamp) index
+    2. Flat index with a 'symbol' column
+    3. Simple flat index (single ticker, no symbol column)
+    """
+    if bars_df is None or bars_df.empty:
+        return []
+
+    frames: List[pd.DataFrame] = []
+
+    # --- Case 1: MultiIndex (symbol, timestamp) ---
+    if isinstance(bars_df.index, pd.MultiIndex):
+        for symbol, g in bars_df.groupby(level=0):
+            df = g.reset_index()
+            if "timestamp" in df.columns:
+                df.rename(columns={"timestamp": "date"}, inplace=True)
+            elif "index" in df.columns:
+                df.rename(columns={"index": "date"}, inplace=True)
+            # Fallback: find any datetime column
+            if "date" not in df.columns:
+                for col in df.columns:
+                    if pd.api.types.is_datetime64_any_dtype(df[col]):
+                        df.rename(columns={col: "date"}, inplace=True)
+                        break
+            df["Ticker"] = symbol
+            frames.append(df)
+
+    # --- Case 2: Flat index with a 'symbol' column ---
+    elif "symbol" in bars_df.columns:
+        for symbol, g in bars_df.groupby("symbol"):
+            df = g.copy().reset_index()
+            if "timestamp" in df.columns:
+                df.rename(columns={"timestamp": "date"}, inplace=True)
+            if "date" not in df.columns:
+                for col in df.columns:
+                    if pd.api.types.is_datetime64_any_dtype(df[col]):
+                        df.rename(columns={col: "date"}, inplace=True)
+                        break
+            df["Ticker"] = symbol
+            frames.append(df)
+
+    # --- Case 3: Simple flat (single ticker) ---
+    else:
+        df = bars_df.reset_index()
+        if "timestamp" in df.columns:
+            df.rename(columns={"timestamp": "date"}, inplace=True)
+        if "date" not in df.columns:
+            for col in df.columns:
+                if pd.api.types.is_datetime64_any_dtype(df[col]):
+                    df.rename(columns={col: "date"}, inplace=True)
+                    break
+        df["Ticker"] = "UNKNOWN"
+        frames.append(df)
+
+    return frames
+
+
+def _select_price_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Rename Alpaca's lowercase OHLCV column names to title-case (open→Open, etc.)
+    and return only the canonical columns: [date, Open, High, Low, Close, Volume, Ticker].
+    """
+    rename_map = {
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+        "volume": "Volume",
+    }
+    for src, dst in rename_map.items():
+        if src in df.columns:
+            df.rename(columns={src: dst}, inplace=True)
+    keep = ["date", "Open", "High", "Low", "Close", "Volume", "Ticker"]
+    return df[[c for c in keep if c in df.columns]]
+
+
+# ------------------ Alpaca Price Fetcher ------------------ #
+def fetch_alpaca_bars(
+    symbols: List[str],
+    start: str = "2015-01-01",
+    end: Optional[str] = None,
+    batch_size: int = 200,
+    api: Optional[Any] = None,
+) -> List[pd.DataFrame]:
+    """
+    Batch-downloads daily OHLCV bars from Alpaca REST API.
+
+    Fetches `symbols` in batches, sleeping 0.5 seconds between batches.
+    Empty or failed batches are skipped with a warning.
+
+    Parameters
+    ----------
+    symbols : List[str]
+        Alpaca ticker symbols to download.
+    start : str, default="2015-01-01"
+        Start date in YYYY-MM-DD format.
+    end : Optional[str], default=None
+        End date in YYYY-MM-DD format. Defaults to today (UTC).
+    batch_size : int, default=200
+        Number of symbols per Alpaca bars API call.
+    api : Optional[tradeapi.REST], default=None
+        Optional existing Alpaca REST client. If None, safely initializes via `_get_alpaca_api()`.
+
+    Returns
+    -------
+    List[pd.DataFrame]
+        One DataFrame per ticker with columns [date, Open, High, Low, Close, Volume, Ticker].
+        Empty batches and failed batches are omitted.
+    """
+    if api is None:
+        api = _get_alpaca_api()
+
+    if api is None:
+        logger.error(
+            "Alpaca API credentials missing or client unavailable; cannot fetch bars."
+        )
+        return []
+
+    if end is None:
+        end = pd.Timestamp.today(tz="UTC").strftime("%Y-%m-%d")
+
+    timeframe = tradeapi.TimeFrame.Day if (tradeapi is not None and hasattr(tradeapi, "TimeFrame")) else "1Day"
+
+    all_frames: List[pd.DataFrame] = []
+    for i in tqdm(range(0, len(symbols), batch_size), desc="Fetching Alpaca Batches"):
+        batch = symbols[i:i + batch_size]
+        batch_num = (i // batch_size) + 1
+        try:
+            bars = api.get_bars(
+                batch,
+                timeframe,
+                start=start,
+                end=end,
+                adjustment="all",
+            ).df
+        except Exception as e:
+            logger.error("Error fetching Alpaca batch %d: %s", batch_num, e)
+            time.sleep(1)
+            continue
+
+        if bars is None or bars.empty:
+            logger.warning("Alpaca returned empty data for batch %d; skipping.", batch_num)
+            time.sleep(0.5)
+            continue
+
+        per_ticker_frames = _bars_to_frames(bars)
+        for df in per_ticker_frames:
+            df = _select_price_cols(df)
+            if df is not None and not df.empty:
+                all_frames.append(df)
+        time.sleep(0.5)
+
+    return all_frames

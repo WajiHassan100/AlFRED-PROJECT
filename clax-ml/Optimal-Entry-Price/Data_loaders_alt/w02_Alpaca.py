@@ -4,7 +4,6 @@ import os
 import sys
 import time
 import logging
-from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -17,7 +16,13 @@ _clax_ml_root = str(Path(__file__).resolve().parents[2])
 if _clax_ml_root not in sys.path:
     sys.path.insert(0, _clax_ml_root)
 
-from shared_data_loaders.liquidity import get_top_liquid_stocks_alpaca
+from shared_data_loaders.liquidity import (
+    get_top_liquid_stocks_alpaca,
+    fetch_alpaca_bars,
+    _bars_to_frames,
+    _select_price_cols,
+)
+from shared_data_loaders.sp500_tickers import _get_alpaca_api
 
 # ------------------ Logging Setup ------------------ #
 logging.basicConfig(
@@ -27,85 +32,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ------------------ API Setup (Alpaca) ------------------ #
+# NOTE (Phase 2b): The module-level `api = tradeapi.REST(...)` call that
+# previously lived here was a crash risk — it raised immediately on import
+# if ALPACA_API_KEY / ALPACA_SECRET_KEY were not set in the environment.
+# All functions in this file now obtain the API client lazily via
+# `_get_alpaca_api()` (imported from shared_data_loaders.sp500_tickers),
+# which returns None gracefully if credentials are missing rather than
+# raising a RuntimeError at import time.
 load_dotenv()
-API_KEY = os.getenv("ALPACA_API_KEY", "")
-API_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
-BASE_URL = "https://paper-api.alpaca.markets"
-
-api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL)
-
-# ------------------ Helpers ------------------ #
-def _bars_to_frames(bars_df):
-    if bars_df is None or bars_df.empty:
-        return []
-
-    frames = []
-    
-    # Handle MultiIndex case (symbol, date format from Alpaca)
-    if isinstance(bars_df.index, pd.MultiIndex):
-        for symbol, g in bars_df.groupby(level=0):
-            df = g.reset_index()
-            # Rename possible date column names (timestamp, index, or already 'date')
-            if 'timestamp' in df.columns:
-                df.rename(columns={"timestamp": "date"}, inplace=True)
-            elif df.index.name == 'timestamp' or 'index' in df.columns:
-                if 'index' in df.columns:
-                    df.rename(columns={"index": "date"}, inplace=True)
-            # If index is datetime, make it a column
-            if not 'date' in df.columns and hasattr(df.index, 'name'):
-                df.reset_index(inplace=True)
-                for col in df.columns:
-                    if pd.api.types.is_datetime64_any_dtype(df[col]):
-                        df.rename(columns={col: "date"}, inplace=True)
-                        break
-            df["Ticker"] = symbol
-            frames.append(df)
-    
-    # Handle symbol column case
-    elif "symbol" in bars_df.columns:
-        for symbol, g in bars_df.groupby("symbol"):
-            df = g.copy().reset_index()
-            if 'timestamp' in df.columns:
-                df.rename(columns={"timestamp": "date"}, inplace=True)
-            # Find any datetime column and call it 'date' if not already
-            if 'date' not in df.columns:
-                for col in df.columns:
-                    if pd.api.types.is_datetime64_any_dtype(df[col]):
-                        df.rename(columns={col: "date"}, inplace=True)
-                        break
-            df["Ticker"] = symbol
-            frames.append(df)
-    
-    # Handle simple case with index as date
-    else:
-        df = bars_df.reset_index()
-        if 'timestamp' in df.columns:
-            df.rename(columns={"timestamp": "date"}, inplace=True)
-        # Find any datetime column and call it 'date' if not already
-        if 'date' not in df.columns:
-            for col in df.columns:
-                if pd.api.types.is_datetime64_any_dtype(df[col]):
-                    df.rename(columns={col: "date"}, inplace=True)
-                    break
-        df["Ticker"] = "UNKNOWN"
-        frames.append(df)
-
-    return frames
-
-
-def _select_price_cols(df):
-    rename_map = {
-        "open": "Open",
-        "high": "High",
-        "low": "Low",
-        "close": "Close",
-        "volume": "Volume",
-    }
-    for k, v in rename_map.items():
-        if k in df.columns:
-            df.rename(columns={k: v}, inplace=True)
-    keep = ["date", "Open", "High", "Low", "Close", "Volume", "Ticker"]
-    return df[[c for c in keep if c in df.columns]]
 
 
 # ------------------ Core Functions ------------------ #
@@ -124,38 +58,17 @@ def get_top_liquid_stocks(symbols, top_n=50, liquidity_days=252, batch_size=200)
 
 
 def fetch_bars_alpaca(symbols, start="2015-01-01", end=None, batch_size=200):
-    if end is None:
-        end = pd.Timestamp.today(tz="UTC").strftime("%Y-%m-%d")
-
-    all_frames = []
-    for i in tqdm(range(0, len(symbols), batch_size), desc="Fetching Alpaca Batches"):
-        batch = symbols[i:i + batch_size]
-        try:
-            bars = api.get_bars(
-                batch,
-                tradeapi.TimeFrame.Day,
-                start=start,
-                end=end,
-                adjustment="all",
-            ).df
-        except Exception as e:
-            logger.error("Error fetching batch %d: %s", (i // batch_size) + 1, e)
-            time.sleep(1)
-            continue
-
-        if bars is None or bars.empty:
-            logger.warning("Alpaca returned empty data for batch %d; skipping.", (i // batch_size) + 1)
-            time.sleep(0.5)
-            continue
-
-        frames = _bars_to_frames(bars)
-        for df in frames:
-            df = _select_price_cols(df)
-            if df is not None and not df.empty:
-                all_frames.append(df)
-        time.sleep(0.5)
-
-    return all_frames
+    """
+    Batch-downloads daily OHLCV bars from Alpaca REST API.
+    Delegates to shared_data_loaders.liquidity.fetch_alpaca_bars with api=None.
+    """
+    return fetch_alpaca_bars(
+        symbols=symbols,
+        start=start,
+        end=end if end is not None else pd.Timestamp.today(tz="UTC").strftime("%Y-%m-%d"),
+        batch_size=batch_size,
+        api=None,
+    )
 
 
 def run_pipeline():
@@ -229,7 +142,7 @@ def run_pipeline():
 
     if not stock_frames:
         logger.warning("No Alpaca stock data fetched or saved in this run!")
-    
+
     logger.info("Saved Alpaca CSVs in %.2f seconds.", time.time() - save_csv_start)
     logger.info("====== Alpaca data fetching pipeline completed in %.2f seconds. ======", time.time() - start_time)
     logger.info("Note: Run w02b_Extras.py separately to fetch FRED + yfinance extras data.")

@@ -4,7 +4,6 @@ import os
 import sys
 import time
 import pandas as pd
-import yfinance as yf
 from pathlib import Path
 from datetime import timedelta
 import logging
@@ -19,6 +18,7 @@ from shared_data_loaders.liquidity import (
     normalize_yahoo_symbol,
     normalize_yahoo_symbol as _normalize_yahoo_symbol,
     get_top_liquid_stocks_yfinance as get_top_liquid_stocks,
+    fetch_yahoo_data as fetch_data,
 )
 
 # ------------------ Logging Setup ------------------ #
@@ -162,37 +162,6 @@ def run_pipeline():
         logger.warning("❌ No data fetched or saved in this run!")
     logger.info(f"Saved CSVs in {time.time() - save_csv_start:.2f} seconds.")
     logger.info(f"====== Yahoo Finance data fetching pipeline completed in {time.time() - start_time:.2f} seconds. ======")
-
-
-def fetch_data(symbols, start="2015-01-01", end=None, batch_size=50):
-    if end is None:
-        end = pd.Timestamp.today().strftime("%Y-%m-%d")
-
-    all_data = []
-    num_batches = (len(symbols) + batch_size - 1) // batch_size
-    for i in tqdm(range(0, len(symbols), batch_size), desc="Fetching Data Batches"):
-        batch_start_time = time.time()
-        batch = symbols[i:i+batch_size]
-        # logger.info(f"Fetching batch {i//batch_size+1}/{num_batches} with {len(batch)} tickers...") # TQDM handles this visually
-        try:
-            df = yf.download(
-                batch, start=start, end=end, group_by="ticker",
-                auto_adjust=True, threads=True, progress=False # Let tqdm handle overall progress
-            )
-            if df is None or df.empty:
-                logger.warning(
-                    "⚠️ yfinance returned empty data for batch %d/%d; skipping this batch.",
-                    (i // batch_size) + 1,
-                    num_batches,
-                )
-            else:
-                all_data.append(df)
-            # logger.info(f"Batch {i//batch_size+1} fetched in {time.time() - batch_start_time:.2f} seconds.")
-        except Exception as e:
-            logger.error(f"Error fetching batch {i//batch_size+1}: {e}")
-        time.sleep(1) # Be respectful to the API
-    return all_data
-
 
 if __name__ == "__main__":
     run_pipeline()

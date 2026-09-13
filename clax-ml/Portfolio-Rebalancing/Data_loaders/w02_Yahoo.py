@@ -4,9 +4,7 @@ import os
 import sys
 import time
 import pandas as pd
-import yfinance as yf
 from pathlib import Path
-from datetime import timedelta
 import logging
 from tqdm import tqdm
 
@@ -17,6 +15,7 @@ if _clax_ml_root not in sys.path:
 
 from shared_data_loaders.liquidity import (
     get_top_liquid_stocks_yfinance as get_top_liquid_stocks,
+    fetch_yahoo_data as fetch_data,
 )
 
 # ------------------ Logging Setup ------------------ #
@@ -222,30 +221,6 @@ def filter_universe(top_n: int = 20, lookback_days: int = 22):
     # Ensure Date is a plain ISO string
     top_universe["Date"] = top_universe["Date"].dt.strftime("%Y-%m-%d")
     return top_universe.to_dict(orient="records")
-
-
-def fetch_data(symbols, start="2015-01-01", end=None, batch_size=50):
-    if end is None:
-        end = pd.Timestamp.today().strftime("%Y-%m-%d")
-
-    all_data = []
-    num_batches = (len(symbols) + batch_size - 1) // batch_size
-    for i in tqdm(range(0, len(symbols), batch_size), desc="Fetching Data Batches"):
-        batch_start_time = time.time()
-        batch = symbols[i:i+batch_size]
-        # logger.info(f"Fetching batch {i//batch_size+1}/{num_batches} with {len(batch)} tickers...") # TQDM handles this visually
-        try:
-            df = yf.download(
-                batch, start=start, end=end, group_by="ticker",
-                auto_adjust=True, threads=True, progress=False # Let tqdm handle overall progress
-            )
-            all_data.append(df)
-            # logger.info(f"Batch {i//batch_size+1} fetched in {time.time() - batch_start_time:.2f} seconds.")
-        except Exception as e:
-            logger.error(f"Error fetching batch {i//batch_size+1}: {e}")
-        time.sleep(1) # Be respectful to the API
-    return all_data
-
 
 if __name__ == "__main__":
     run_pipeline()
